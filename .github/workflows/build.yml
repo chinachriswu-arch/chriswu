@@ -1,0 +1,89 @@
+name: Build iPhone app
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-latest
+    timeout-minutes: 35
+    defaults:
+      run:
+        working-directory: QuotaPocket
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Unpack source
+        working-directory: .
+        run: unzip -q QuotaPocket_iPhone_Source.zip
+
+      - name: Install project generator
+        run: brew install xcodegen
+
+      - name: Generate project
+        run: xcodegen generate
+
+      - name: Choose simulator
+        run: |
+          python3 - <<'PY'
+          import json, os, subprocess
+          data = subprocess.check_output(
+              ['xcrun', 'simctl', 'list', 'devices', 'available', '-j']
+          )
+          devices = json.loads(data)['devices']
+          phones = [
+              d for runtime, entries in devices.items()
+              if 'iOS' in runtime
+              for d in entries
+              if d.get('isAvailable') and d['name'].startswith('iPhone')
+          ]
+          if not phones:
+              raise SystemExit('No iPhone simulator available')
+          with open(os.environ['GITHUB_ENV'], 'a') as f:
+              f.write('QUOTA_SIMULATOR_ID=' + phones[0]['udid'] + '\n')
+          PY
+
+      - name: Run tests
+        run: >-
+          xcodebuild -project QuotaPocket.xcodeproj
+          -scheme QuotaPocket
+          -destination "platform=iOS Simulator,id=$QUOTA_SIMULATOR_ID"
+          -derivedDataPath build-test
+          -resultBundlePath TestResults.xcresult
+          test CODE_SIGNING_ALLOWED=NO
+          -parallel-testing-enabled NO
+
+      - name: Build iPhone app
+        run: >-
+          xcodebuild -project QuotaPocket.xcodeproj
+          -scheme QuotaPocket
+          -configuration Release
+          -destination 'generic/platform=iOS'
+          -derivedDataPath build-device
+          build CODE_SIGNING_ALLOWED=NO
+
+      - name: Package IPA
+        run: |
+          mkdir -p output/Payload
+          cp -R build-device/Build/Products/Release-iphoneos/QuotaPocket.app output/Payload/
+          cd output
+          zip -qry QuotaPocket-unsigned.ipa Payload
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: QuotaPocket-unsigned-ipa
+          path: QuotaPocket/output/QuotaPocket-unsigned.ipa
+          retention-days: 7
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: test-results
+          path: QuotaPocket/TestResults.xcresult
+          if-no-files-found: ignore
